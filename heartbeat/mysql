@@ -513,7 +513,7 @@ get_slave_info() {
 	return $OCF_SUCCESS
 }
 
-quit_on_replication_error() {
+quit_on_error() {
 	local error_message="$1"
 	local exit_code="$2"
 
@@ -542,18 +542,18 @@ check_slave() {
 		# Instance produced an empty "SHOW SLAVE STATUS" output --
 		# instance is not a slave
 		# TODO: Needs to handle when get_slave_info will return too many connections error
-		quit_on_replication_error "check_slave invoked on an instance that is not a replication slave: $rc" $OCF_ERR_GENERIC
+		quit_on_error "check_slave invoked on an instance that is not a replication slave: $rc" $OCF_ERR_GENERIC
 	fi
 
 	if [ "${Last_SQL_Error}" != "" ] || [ "${Last_SQL_Errno}" != "0" ]; then
-		quit_on_replication_error "Replication failed Last_Errno: $Last_SQL_Errno Last_SQL_Error: $Last_SQL_Error" $OCF_ERR_GENERIC
+		quit_on_error "Replication failed Last_Errno: $Last_SQL_Errno Last_SQL_Error: $Last_SQL_Error" $OCF_ERR_GENERIC
 	fi
 	if [ "${Last_IO_Error}" != "" ] || [ "${Last_IO_Errno}" != "0" ]; then
-		quit_on_replication_error "Replication failed Last_IO_Errno: $Last_IO_Errno Last_IO_Error: $Last_IO_Error" $OCF_ERR_GENERIC
+		quit_on_error "Replication failed Last_IO_Errno: $Last_IO_Errno Last_IO_Error: $Last_IO_Error" $OCF_ERR_GENERIC
 	fi
 	if [ "${Last_Error}" != "" ] || [ "${Last_Errno}" != "0" ]; then
 		# Did we receive an error other than max_connections?
-		quit_on_replication_error "Replication failed Last_Errno: $Last_Errno Last_Error: $Last_Error" $OCF_ERR_GENERIC
+		quit_on_error "Replication failed Last_Errno: $Last_Errno Last_Error: $Last_Error" $OCF_ERR_GENERIC
 	fi
 
 	if [ "$Slave_SQL_Running" != 'Yes' ] || [ "$Slave_IO_Running" != 'Yes' ]; then
@@ -566,22 +566,22 @@ check_slave() {
 		# Sanity check, are we at least on the right master
 		new_master=`$CRM_ATTR_REPL_INFO --query  -q | cut -d'|' -f1`
 		if [ "$master_host" != "$new_master" ]; then
-			quit_on_replication_error "Replication failed node master: $master_host cluster master: $new_master" $OCF_ERR_GENERIC
+			quit_on_error "Replication failed node master: $master_host cluster master: $new_master" $OCF_ERR_GENERIC
 		fi
 
 		# try to restart slave
 		ocf_run $MYSQL $MYSQL_OPTIONS_REPL \
 			-e "START SLAVE"
 
-		# quit_on_replication_error should always quit with success here
+		# quit_on_error should always quit with success here
 		# If further errors occur after this start slave they will be cought by the checks above
-		quit_on_replication_error "Replication failed Slave_SQL_Running ($Slave_SQL_Running) Slave_IO_Running ($Slave_IO_Running) ... start slave was attempted" 0
+		quit_on_error "Replication failed Slave_SQL_Running ($Slave_SQL_Running) Slave_IO_Running ($Slave_IO_Running) ... start slave was attempted" 0
 	fi
 
 	if ocf_is_true $OCF_RESKEY_evict_outdated_slaves; then
 		# We're supposed to bail out if we lag too far behind. Let's check our lag.
 		if [ $Seconds_Behind_Master -gt $OCF_RESKEY_max_slave_lag ]; then
-			quit_on_replication_error "Replication failed max_slave_lag: $OCF_RESKEY_max_slave_lag current_lag: $Seconds_Behind_Master" $OCF_ERR_INSTALLED
+			quit_on_error "Replication failed max_slave_lag: $OCF_RESKEY_max_slave_lag current_lag: $Seconds_Behind_Master" $OCF_ERR_INSTALLED
 		fi
 	fi
 
@@ -867,14 +867,14 @@ mysql_monitor() {
 
 	# If status returned an error, return that immediately
 	if [ $rc -ne $OCF_SUCCESS ]; then
-		quit_on_replication_error "mysql_status returned error: $rc" $rc
+		quit_on_error "mysql_status returned error: $rc" $rc
 	fi
 
 	ocf_log debug "OCF_CHECK_LEVEL: $OCF_CHECK_LEVEL OCF_RESKEY_test_table: $OCF_RESKEY_test_table"
 	if [ $OCF_CHECK_LEVEL -gt 0 -a -n "$OCF_RESKEY_test_table" ]; then
 		# Check for test table
 		if ! ocf_run -q $MYSQL $MYSQL_OPTIONS_TEST -e "SELECT COUNT(*) FROM $OCF_RESKEY_test_table"; then
-			quit_on_replication_error "Failed to select from $test_table ... triggering $CRM_MASTER -D and returning $OCF_ERR_GENERIC" $OCF_ERR_GENERIC
+			quit_on_error "Failed to select from $test_table ... triggering $CRM_MASTER -D and returning $OCF_ERR_GENERIC" $OCF_ERR_GENERIC
 		fi
 	fi
 
