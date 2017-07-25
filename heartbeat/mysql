@@ -411,7 +411,7 @@ set_read_only() {
 		-e "SET GLOBAL read_only=${ro_val}"
 }
 
-get_read_only() {
+node_is_read_only() {
 	# Check if read-only is set
 	local read_only_state
 
@@ -434,8 +434,8 @@ is_slave() {
 	local tmpfile
 
 	# Check whether this machine should be slave
-	if ! ocf_is_ms || ! get_read_only; then
-		ocf_log debug "is_slave called on non-ocf_is_ms or non-get_read_only"
+	if ! ocf_is_ms || ! node_is_read_only; then
+		ocf_log debug "is_slave called on non-ocf_is_ms or non-node_is_read_only"
 		return 1
 	fi
    
@@ -447,7 +447,7 @@ is_slave() {
 	   # Is there a master_log_file defined?  (master_log_file is deleted 
 	   # by reset slave
 	   if [ "$master_log_file" ]; then
-			ocf_log info "is_slave returned sucess with master_log_file: $master_log_file"
+			ocf_log debug "is_slave returned sucess with master_log_file: $master_log_file"
 			return 0
 	   else
 			ocf_log err "is_slave is false as no master_log_file $master_log_file is given"
@@ -470,10 +470,10 @@ parse_slave_info() {
 get_slave_info() {
 	# Warning: this sets $tmpfile and LEAVE this file! You must delete it after use!
 	local mysql_options
-	ocf_log info "Entered get_slave_info"
+	ocf_log debug "Entered get_slave_info"
 			
 	if [ "$master_log_file" -a "$master_host" ]; then
-		ocf_log info "variables $master_log_file $master_host are already defined, get_slave_info has been run before"
+		ocf_log debug "variables $master_log_file $master_host are already defined, get_slave_info has been run before"
 		return $OCF_SUCCESS
 	fi
 
@@ -496,7 +496,7 @@ get_slave_info() {
 	master_log_file=`parse_slave_info Master_Log_File $tmpfile`
 	master_log_pos=`parse_slave_info Read_Master_Log_Pos $tmpfile`
 	Slave_SQL_Running=`parse_slave_info Slave_SQL_Running $tmpfile`
-	slave_io=`parse_slave_info Slave_IO_Running $tmpfile`
+	Slave_IO_Running=`parse_slave_info Slave_IO_Running $tmpfile`
 	Last_Errno=`parse_slave_info Last_Errno $tmpfile`
 	secs_behind=`parse_slave_info Seconds_Behind_Master $tmpfile`
 	Last_Error=`parse_slave_info Last_Error $tmpfile`
@@ -505,10 +505,10 @@ get_slave_info() {
 	Last_SQL_Errno=`parse_slave_info Last_SQL_Errno $tmpfile`
 	Last_SQL_Error=`parse_slave_info Last_SQL_Error $tmpfile`
 
-	ocf_log info "$tmpfile parsed $master_host $master_user $master_port $master_log_file $master_log_pos $Slave_SQL_Running $slave_io $Last_Errno $secs_behind $Last_Error $Last_IO_Errno $Last_IO_Error  $Last_SQL_Errno $Last_SQL_Error"
-	ocf_log info "MySQL instance running as a replication slave from master_log_file ${master_log_file}"
+	ocf_log debug "$tmpfile parsed $master_host $master_user $master_port $master_log_file $master_log_pos $Slave_SQL_Running $Slave_IO_Running $Last_Errno $secs_behind $Last_Error $Last_IO_Errno $Last_IO_Error  $Last_SQL_Errno $Last_SQL_Error"
+	ocf_log debug "MySQL instance running as a replication slave from master_log_file ${master_log_file}"
 
-	ocf_log info "get_slave_info will be returning success $OCF_SUCCESS"
+	ocf_log debug "get_slave_info will be returning success $OCF_SUCCESS"
 	return $OCF_SUCCESS
 }
 
@@ -522,10 +522,8 @@ quit_on_replication_error () {
 	# Removing the VIPs
 	set_reader_attr 0
 
-	ocf_log info "quit_on_replication_error called error_message: ${error_message} exit_code: ${exit_code}"
-
 	# Log the error
-	ocf_log err "${error_message}"
+	ocf_log err "error_message: ${error_message} exit_code: ${exit_code}"
 
 	if ocf_is_true $OCF_RESKEY_evict_outdated_slaves; then
 		# evict_outdated_slaves is set to true.
@@ -554,22 +552,34 @@ check_slave() {
 		# Instance produced an empty "SHOW SLAVE STATUS" output --
 		# instance is not a slave
 		# TODO: Needs to handle when get_slave_info will return too many connections error
-		quit_on_replication_error "Replication failed check_slave called on non slave instance See: $tmpfile" $OCF_ERR_GENERIC
+		quit_on_replication_error "Replication failed check_slave called on non slave instance code $rc See: $tmpfile" $OCF_ERR_GENERIC
+	fi
+
+	if [ "${Last_SQL_Error}" != "" ] || [ "${Last_SQL_Errno}" != "0" ]; then
+		quit_on_replication_error "Replication failed Last_Errno: $Last_SQL_Errno Last_SQL_Error: $Last_SQL_Error See: $tmpfile" $OCF_ERR_GENERIC
+	fi
+	if [ "${Last_IO_Error}" != "" ] || [ "${Last_IO_Errno}" != "0" ]; then
+		quit_on_replication_error "Replication failed Last_IO_Errno: $Last_IO_Errno Last_IO_Error: $Last_IO_Error See: $tmpfile" $OCF_ERR_GENERIC
+	fi
+	if [ "${Last_Error}" != "" ] || [ "${Last_Errno}" != "0" ]; then
+		# Did we receive an error other than max_connections?
+		quit_on_replication_error "Replication failed Last_Errno: $Last_Errno Last_Error: $Last_Error See: $tmpfile" $OCF_ERR_GENERIC
 	fi
 
 	if [ "$Slave_SQL_Running" != 'Yes' ]; then
-		# We dont have a replication SQL thread running. Not a good thing. Try to recoved by restarting the SQL thread and remove reader vip.
+		# We dont have a replication SQL thread running. Not a good thing but not so bad thing too.
+		# Try to recoved by restarting the SQL thread and remove reader vip.
 
 		# try to restart slave
 		ocf_run $MYSQL $MYSQL_OPTIONS_REPL \
 			-e "START SLAVE"
 
 		# quit_on_replication_error should always quit with success here
-		# If further errors occur after this start slave they will be cought by the next checks
-		quit_on_replication_error "Replication failed Slave_SQL_Running: ($Slave_SQL_Running) See: $tmpfile" 0
+		# If further errors occur after this start slave they will be cought by the checks above
+		quit_on_replication_error "Replication failed Slave_SQL_Running: ($Slave_SQL_Running) ... start slave was attempted. See: $tmpfile" 0
 	fi
 
-	if [ "$slave_io" != 'Yes' ]; then
+	if [ "$Slave_IO_Running" != 'Yes' ]; then
 		# Not necessarily a bad thing. The master may have
 		# temporarily shut down, and the slave may just be
 		# reconnecting. A warning can't hurt, though.
@@ -581,17 +591,14 @@ check_slave() {
 		if [ "$master_host" != "$new_master" ]; then
 			quit_on_replication_error "Replication failed node master: $master_host cluster master: $new_master See: $tmpfile" $OCF_ERR_GENERIC
 		fi
-	fi
 
-	if [ "${Last_SQL_Error}" != "" ] || [ "${Last_SQL_Errno}" != "0" ]; then
-		quit_on_replication_error "Replication failed Last_Errno: $Last_SQL_Errno Last_SQL_Error: $Last_SQL_Error See: $tmpfile" $OCF_ERR_GENERIC
-	fi
-	if [ "${Last_IO_Error}" != "" ] || [ "${Last_IO_Errno}" != "0" ]; then
-		quit_on_replication_error "Replication failed Last_IO_Errno: $Last_IO_Errno Last_IO_Error: $Last_IO_Error See: $tmpfile" $OCF_ERR_GENERIC
-	fi
-	if [ "${Last_Errno}" != "0" ] || [ "${Last_Error}" != "" ]; then
-		# Did we receive an error other than max_connections?
-		quit_on_replication_error "Replication failed Last_Errno: $Last_Errno Last_Error: $Last_Error See: $tmpfile" $OCF_ERR_GENERIC
+		# try to restart slave
+		ocf_run $MYSQL $MYSQL_OPTIONS_REPL \
+			-e "START SLAVE"
+
+		# quit_on_replication_error should always quit with success here
+		# If further errors occur after this start slave they will be cought by the checks above
+		quit_on_replication_error "Replication failed Slave_SQL_Running: ($Slave_SQL_Running) ... start slave was attempted. See: $tmpfile" 0
 	fi
 
 	if ocf_is_true $OCF_RESKEY_evict_outdated_slaves; then
@@ -752,6 +759,7 @@ unset_master(){
 
 # Start replication as slave
 start_slave() {
+	ocf_log info "Invoking start_slave locally"
 	ocf_run $MYSQL $MYSQL_OPTIONS_REPL \
 		-e "START SLAVE"
 }
@@ -886,38 +894,48 @@ mysql_monitor() {
 
 	# If status returned an error, return that immediately
 	if [ $rc -ne $OCF_SUCCESS ]; then
-		$CRM_MASTER -D
-		return $rc
+		quit_on_replication_error "mysql_status returned error: $rc" $rc
 	fi
 
 	ocf_log debug "OCF_CHECK_LEVEL: $OCF_CHECK_LEVEL OCF_RESKEY_test_table: $OCF_RESKEY_test_table"
 	if [ $OCF_CHECK_LEVEL -gt 0 -a -n "$OCF_RESKEY_test_table" ]; then
-		# Check if this instance is configured as a slave, and if so
-		# check slave status
-		if is_slave; then
-			ocf_log info "Checking slave status"
-			check_slave
+		# Check for test table
+		if ! ocf_run -q $MYSQL $MYSQL_OPTIONS_TEST -e "SELECT COUNT(*) FROM $OCF_RESKEY_test_table"; then
+			quit_on_replication_error "Failed to select from $test_table ... triggering $CRM_MASTER -D and returning $OCF_ERR_GENERIC" $OCF_ERR_GENERIC
 		fi
 
-		# Check for test table
-		ocf_run -q $MYSQL $MYSQL_OPTIONS_TEST \
-			-e "SELECT COUNT(*) FROM $OCF_RESKEY_test_table"
-		rc=$?
-		if [ $rc -ne 0 ]; then
-			ocf_log err "Failed to select from $test_table ...  returning $OCF_ERR_GENERIC";
-			ocf_log warn "TRITGERING $CRM_MASTER -D"
-			$CRM_MASTER -D
-			return $OCF_ERR_GENERIC;
+		if is_slave; then
+			# Check if this instance is configured as a slave, and if so check slave status in details
+			ocf_log debug "Checking slave status in details"
+			check_slave
+		else
+			# master is always readable and always with highest scores
+			$CRM_MASTER -v $((${OCF_RESKEY_max_slave_lag}+1))
+			set_reader_attr 1
 		fi
+	elif ocf_is_ms; then
+		# In case no exnteded tests are enabled and we are in master/slave mode _always_ set the master score to 1 if we reached this point
+		if node_is_read_only; then
+			# slave
+			$CRM_MASTER -v ${OCF_RESKEY_max_slave_lag}
+		else
+			# master
+			$CRM_MASTER -v $((${OCF_RESKEY_max_slave_lag}+1))
+		fi
+		# If all checks passed we set reader VIP to readable
+		set_reader_attr 1
 	fi
 
-	if ocf_is_ms && ! get_read_only; then
-		$CRM_MASTER -v $((${OCF_RESKEY_max_slave_lag}+1))
-		ocf_log debug "MySQL monitor succeeded (master) ... returning $OCF_RUNNING_MASTER";
-		return $OCF_RUNNING_MASTER
+	if ocf_is_ms; then
+		if node_is_read_only; then
+			ocf_log debug "MySQL monitor succeeded (slave) ... returning $OCF_SUCCESS";
+			return $OCF_SUCCESS
+		else
+			ocf_log debug "MySQL monitor succeeded (master) ... returning $OCF_RUNNING_MASTER";
+			return $OCF_RUNNING_MASTER
+		fi
 	else
-		$CRM_MASTER -v ${OCF_RESKEY_max_slave_lag}
-		ocf_log info "MySQL monitor succeeded (slave) ... returning $OCF_SUCCESS";
+		ocf_log debug "MySQL monitor succeeded ... returning $OCF_SUCCESS";
 		return $OCF_SUCCESS
 	fi
 
@@ -1056,6 +1074,7 @@ mysql_start() {
 	if [ -n "$OCF_RESKEY_test_table" -a -n "$OCF_RESKEY_test_user" -a -n "$OCF_RESKEY_test_passwd" ]; then
 		OCF_CHECK_LEVEL=10
 	fi
+	ocf_log info "Calling mysql_monitor after start with OCF_CHECK_LEVEL $OCF_CHECK_LEVEL"
 	mysql_monitor
 	rc=$?
 	if [ $rc != $OCF_SUCCESS -a $rc != $OCF_RUNNING_MASTER ]; then
@@ -1067,7 +1086,6 @@ mysql_start() {
 }
 
 mysql_stop() {
-
 	if ocf_is_ms; then
 		# clear preference for becoming master
 		$CRM_MASTER -D
